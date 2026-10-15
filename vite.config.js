@@ -3,11 +3,14 @@ import { defineConfig, loadEnv } from "vite";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-
+  const apiPort =
+    process.env.NODE_ENV === "production"
+      ? env.PORT || env.API_PORT || "5000"
+      : env.API_PORT || "5000";
   const target =
     env.API_PROXY_TARGET ||
     env.VITE_API_BASE_URL ||
-    "https://travel-tech-82ex.vercel.app";
+    `http://localhost:${apiPort}`;
 
   return {
     plugins: [react()],
@@ -16,7 +19,7 @@ export default defineConfig(({ mode }) => {
         "/api": {
           target,
           changeOrigin: true,
-          secure: true,
+          secure: false,
         },
       },
     },

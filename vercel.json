@@ -2,8 +2,12 @@
   "version": 2,
   "rewrites": [
     {
+      "source": "/api/health",
+      "destination": "/backend/api/health.js"
+    },
+    {
       "source": "/api/(.*)",
-      "destination": "https://travel-tech-82ex.vercel.app/api/$1"
+      "destination": "/backend/api/index.js"
     }
   ]
 }
