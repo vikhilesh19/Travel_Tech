@@ -64,7 +64,6 @@ function App() {
   const [smsHelpNumber, setSmsHelpNumber] = useState("");
   const [smsAlertsEnabled, setSmsAlertsEnabled] = useState(false);
   const [databaseStatus, setDatabaseStatus] = useState("checking");
-  const [databaseName, setDatabaseName] = useState("");
   const [savedSnapshot, setSavedSnapshot] = useState(null);
   const [savingOffline, setSavingOffline] = useState(false);
   const [isOnline, setIsOnline] = useState(
@@ -90,19 +89,13 @@ function App() {
     let active = true;
     async function checkDatabase() {
       try {
-        const response = await fetch("http://localhost:5000/api/health", { cache: "no-store" });
+        const response = await apiFetch("/api/health", { cache: "no-store" });
         const data = await response.json();
         if (!response.ok || data.success !== true)
           throw new Error("Database is unavailable.");
-        if (active) {
-          setDatabaseStatus("connected");
-          setDatabaseName(data.database || "neondb");
-        }
+        if (active) setDatabaseStatus("connected");
       } catch {
-        if (active) {
-          setDatabaseStatus("unavailable");
-          setDatabaseName("");
-        }
+        if (active) setDatabaseStatus("unavailable");
       }
     }
 
@@ -491,7 +484,6 @@ function App() {
           savingOffline={savingOffline}
           offlineSaveDisabled={!isOnline || offlineDataShown}
           databaseStatus={databaseStatus}
-          databaseName={databaseName}
           t={t.topbar}
         />
         {offlineDataShown && (
