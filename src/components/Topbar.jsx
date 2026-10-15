@@ -15,7 +15,6 @@ function Topbar({
   savingOffline,
   offlineSaveDisabled,
   databaseStatus = "checking",
-  databaseName = "",
   t,
 }) {
   const languageSelectId = useId();
@@ -143,7 +142,7 @@ function Topbar({
           <i />
           <span>
             {databaseStatus === "connected"
-              ? (databaseName ? `Neon (${databaseName}) connected` : "Neon database connected")
+              ? topbarText.databaseConnected || "Database connected"
               : databaseStatus === "unavailable"
                 ? topbarText.databaseUnavailable || "Database unavailable"
                 : topbarText.databaseChecking || "Checking database"}
