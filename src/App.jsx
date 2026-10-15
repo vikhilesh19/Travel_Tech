@@ -90,10 +90,7 @@ function App() {
     let active = true;
     async function checkDatabase() {
       try {
-        const response = await apiFetch("/api/health", {
-          cache: "no-store",
-          credentials: "omit",
-        });
+        const response = await fetch("http://localhost:5000/api/health", { cache: "no-store" });
         const data = await response.json();
         if (!response.ok || data.success !== true)
           throw new Error("Database is unavailable.");

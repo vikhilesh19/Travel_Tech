@@ -1,56 +1,13 @@
-const fs = require("node:fs");
-const path = require("node:path");
+require("dotenv").config();
 const crypto = require("node:crypto");
 const bcrypt = require("bcryptjs");
 const express = require("express");
 const nodemailer = require("nodemailer");
-const envPath = path.resolve(__dirname, "..", ".env");
-const dotenvResult = require("dotenv").config({ path: envPath });
-
-if (
-  !process.env.SESSION_SECRET?.trim() &&
-  dotenvResult.parsed?.SESSION_SECRET?.trim()
-) {
-  process.env.SESSION_SECRET = dotenvResult.parsed.SESSION_SECRET;
-}
-
-function getSessionSecret() {
-  if (process.env.SESSION_SECRET?.trim()) return process.env.SESSION_SECRET;
-  if (process.env.VERCEL === "1" && require.main !== module) return "";
-
-  const secretPath = path.resolve(__dirname, "..", ".session-secret");
-  try {
-    const storedSecret = fs.readFileSync(secretPath, "utf8").trim();
-    if (storedSecret) return storedSecret;
-    throw new Error("The local session secret file is empty.");
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
-
-  const newSecret = crypto.randomBytes(32).toString("hex");
-  try {
-    fs.writeFileSync(secretPath, newSecret, { encoding: "utf8", flag: "wx" });
-    return newSecret;
-  } catch (error) {
-    if (error.code !== "EEXIST") throw error;
-    const storedSecret = fs.readFileSync(secretPath, "utf8").trim();
-    if (!storedSecret) throw new Error("The local session secret file is empty.");
-    return storedSecret;
-  }
-}
-
-const sessionSecret = getSessionSecret();
-if (sessionSecret) process.env.SESSION_SECRET = sessionSecret;
-
-const pool = require("./database");
+const { Pool } = require("pg");
 const healthHandler = require("./api/health");
 
 const app = express();
-const port = Number(
-  process.env.NODE_ENV === "production"
-    ? process.env.PORT || process.env.API_PORT || 5000
-    : process.env.API_PORT || 5000,
-);
+const port = Number(process.env.PORT || process.env.API_PORT || 5000);
 
 const allowedFrontendOrigins = new Set(
   (process.env.FRONTEND_ORIGINS || "http://localhost:5173,http://127.0.0.1:5173")
@@ -67,60 +24,47 @@ const translationRequests = new Map();
 const helpActionRequests = new Map();
 const smsCodeRequests = new Map();
 
-let databaseInitialization;
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
 app.use(express.json({ limit: "16kb" }));
 app.use(express.urlencoded({ extended: false, limit: "4kb" }));
 
 app.use((req, res, next) => {
   const origin = req.get("Origin");
-  if (origin) {
-    let allowed = true;
-    if (allowedFrontendOrigins.size > 0) {
-      try {
-        const parsed = new URL(origin);
-        allowed =
-          ["localhost", "127.0.0.1"].includes(parsed.hostname) ||
-          parsed.hostname.endsWith(".vercel.app") ||
-          allowedFrontendOrigins.has(origin);
-      } catch {
-        allowed = false;
-      }
-    }
-    if (allowed) {
-      res.setHeader("Access-Control-Allow-Origin", origin);
-      res.setHeader("Access-Control-Allow-Credentials", "true");
-      res.setHeader(
-        "Access-Control-Allow-Methods",
-        "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-      );
-      res.setHeader(
-        "Access-Control-Allow-Headers",
-        "Content-Type,X-Requested-With,X-Wayfinder-Refresh,Authorization",
-      );
-      res.setHeader(
-        "Access-Control-Expose-Headers",
-        "X-Wayfinder-Cached-At,X-Wayfinder-Offline",
-      );
-      res.setHeader("Vary", "Origin");
+  if (!origin) return next();
+  let localDevelopmentOrigin = false;
+  if (process.env.NODE_ENV !== "production") {
+    try {
+      const parsedOrigin = new URL(origin);
+      localDevelopmentOrigin =
+        parsedOrigin.protocol === "http:" &&
+        ["localhost", "127.0.0.1"].includes(parsedOrigin.hostname);
+    } catch {
+      localDevelopmentOrigin = false;
     }
   }
+  if (!allowedFrontendOrigins.has(origin) && !localDevelopmentOrigin) {
+    return res.status(403).json({ error: "Frontend origin is not allowed." });
+  }
+
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type,X-Requested-With,X-Wayfinder-Refresh",
+  );
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    "X-Wayfinder-Cached-At,X-Wayfinder-Offline",
+  );
+  res.setHeader("Vary", "Origin");
 
   if (req.method === "OPTIONS") return res.sendStatus(204);
   return next();
-});
-
-app.use(async (req, res, next) => {
-  if (req.path === "/api/health" || req.method === "OPTIONS") return next();
-  try {
-    await ensureDatabaseReady();
-    return next();
-  } catch (error) {
-    console.error("PostgreSQL database initialization failed:", error.message);
-    return res
-      .status(503)
-      .json({ error: "The application database is unavailable." });
-  }
 });
 
 // Health check endpoint uses backend/api/health.js
@@ -541,7 +485,7 @@ function safeEqual(first, second) {
 
 function sign(payload) {
   return crypto
-    .createHmac("sha256", process.env.SESSION_SECRET || "")
+    .createHmac("sha256", process.env.SESSION_SECRET || "wayfinder-secret-key-123456789")
     .update(payload)
     .digest("base64url");
 }
@@ -553,7 +497,7 @@ function getSession(req) {
     .map((cookie) => cookie.trim())
     .find((cookie) => cookie.startsWith(`${sessionCookieName}=`))
     ?.slice(sessionCookieName.length + 1);
-  if (!token || !process.env.SESSION_SECRET) return null;
+  if (!token) return null;
 
   const [payload, signature] = decodeURIComponent(token).split(".");
   if (!payload || !signature || !safeEqual(sign(payload), signature))
@@ -630,26 +574,16 @@ function setSessionCookie(res, username) {
   ).toString("base64url");
   const token = `${payload}.${sign(payload)}`;
   const sameSite = process.env.COOKIE_SAME_SITE || "lax";
-  const requestHostname = res.req.hostname
-    .replace(/^\[|\]$/g, "")
-    .toLowerCase();
-  const isLocalHost = ["localhost", "127.0.0.1", "::1"].includes(requestHostname);
   res.cookie(sessionCookieName, token, {
     httpOnly: true,
     sameSite,
-    secure:
-      sameSite === "none" || (process.env.NODE_ENV === "production" && !isLocalHost),
+    secure: process.env.NODE_ENV === "production",
     maxAge: sessionLifetimeSeconds * 1000,
     path: "/",
   });
 }
 
 app.post("/api/officer/login", async (req, res) => {
-  if (!process.env.SESSION_SECRET) {
-    return res
-      .status(503)
-      .json({ error: "Officer sign-in is not configured. Set SESSION_SECRET." });
-  }
   const { username, password } = req.body || {};
   if (typeof username !== "string" || typeof password !== "string") {
     return res.status(401).json({ error: "Invalid officer credentials." });
@@ -694,7 +628,7 @@ app.post("/api/officer/login", async (req, res) => {
 
 function otpDigest(email, code) {
   return crypto
-    .createHmac("sha256", process.env.SESSION_SECRET || "")
+    .createHmac("sha256", process.env.SESSION_SECRET || "wayfinder-secret-key-123456789")
     .update(`${email}:${code}`)
     .digest("hex");
 }
@@ -715,11 +649,6 @@ function mailTransport() {
 }
 
 app.post("/api/officer/register/send-otp", async (req, res) => {
-  if (!process.env.SESSION_SECRET) {
-    return res
-      .status(503)
-      .json({ error: "Officer registration is not configured. Set SESSION_SECRET." });
-  }
   const { email, username, password } = req.body || {};
   const normalizedEmail =
     typeof email === "string" ? email.trim().toLowerCase() : "";
@@ -830,11 +759,6 @@ app.post("/api/officer/register/send-otp", async (req, res) => {
 });
 
 app.post("/api/officer/register", async (req, res) => {
-  if (!process.env.SESSION_SECRET) {
-    return res
-      .status(503)
-      .json({ error: "Officer registration is not configured. Set SESSION_SECRET." });
-  }
   const email =
     typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
   const code = typeof req.body?.otp === "string" ? req.body.otp.trim() : "";
@@ -935,16 +859,9 @@ app.get("/api/officer/session", (req, res) => {
 });
 
 app.post("/api/officer/logout", (_req, res) => {
-  const sameSite = process.env.COOKIE_SAME_SITE || "lax";
-  const requestHostname = res.req.hostname
-    .replace(/^\[|\]$/g, "")
-    .toLowerCase();
-  const isLocalHost = ["localhost", "127.0.0.1", "::1"].includes(requestHostname);
   res.clearCookie(sessionCookieName, {
     httpOnly: true,
-    sameSite,
-    secure:
-      sameSite === "none" || (process.env.NODE_ENV === "production" && !isLocalHost),
+    sameSite: "lax",
     path: "/",
   });
   return res.status(204).end();
@@ -1119,16 +1036,9 @@ app.delete("/api/hazards/:id", requireOfficer, async (req, res) => {
   }
 });
 
-async function initializeDatabase() {
-  if (!process.env.DATABASE_URL) {
-    throw new Error("DATABASE_URL is not configured.");
-  }
-
-  const client = await pool.connect();
+async function start() {
   try {
-    await client.query("BEGIN");
-    await client.query("SELECT pg_advisory_xact_lock(74201931)");
-    await client.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS hazards (
         id BIGSERIAL PRIMARY KEY,
         hazard VARCHAR(80) NOT NULL,
@@ -1150,42 +1060,7 @@ async function initializeDatabase() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
-    await client.query(`
-      ALTER TABLE hazards
-        ADD COLUMN IF NOT EXISTS area_id VARCHAR(16) NOT NULL DEFAULT 'kerala',
-        ADD COLUMN IF NOT EXISTS affected_zone VARCHAR(120),
-        ADD COLUMN IF NOT EXISTS alert_text TEXT,
-        ADD COLUMN IF NOT EXISTS onset_at TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS source VARCHAR(160),
-        ADD COLUMN IF NOT EXISTS source_url VARCHAR(500),
-        ADD COLUMN IF NOT EXISTS is_demo BOOLEAN NOT NULL DEFAULT TRUE
-    `);
-    await client.query(
-      "ALTER TABLE hazards ALTER COLUMN severity TYPE VARCHAR(32), ALTER COLUMN description TYPE TEXT",
-    );
-    await client.query(
-      "ALTER TABLE hazards DROP CONSTRAINT IF EXISTS hazards_severity_check",
-    );
-    await client.query(`
-      UPDATE hazards SET severity = CASE severity
-        WHEN 'Low' THEN 'Information (blue)'
-        WHEN 'Moderate' THEN 'Advisory (yellow)'
-        WHEN 'High' THEN 'Warning (orange)'
-        WHEN 'Severe' THEN 'Danger (red)'
-        ELSE severity
-      END
-      WHERE severity IN ('Low', 'Moderate', 'High', 'Severe')
-    `);
-    await client.query(`
-      ALTER TABLE hazards ADD CONSTRAINT hazards_severity_check
-      CHECK (severity IN ('Danger (red)', 'Warning (orange)', 'Advisory (yellow)', 'Information (blue)'))
-    `);
-    await client.query(`
-      UPDATE hazards SET affected_zone = COALESCE(affected_zone, location),
-                          alert_text = COALESCE(alert_text, description)
-    `);
-    await client.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS officer_accounts (
         id BIGSERIAL PRIMARY KEY,
         username VARCHAR(32) NOT NULL UNIQUE,
@@ -1193,24 +1068,7 @@ async function initializeDatabase() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
-    await client.query(
-      "ALTER TABLE officer_accounts ADD COLUMN IF NOT EXISTS email VARCHAR(254)",
-    );
-    await client.query(
-      "CREATE UNIQUE INDEX IF NOT EXISTS officer_accounts_email_unique ON officer_accounts (email) WHERE email IS NOT NULL",
-    );
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS officer_registration_otps (
-        email VARCHAR(254) PRIMARY KEY,
-        username VARCHAR(32) NOT NULL,
-        password_hash VARCHAR(100) NOT NULL,
-        otp_hash VARCHAR(64) NOT NULL,
-        expires_at TIMESTAMPTZ NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        last_sent_at TIMESTAMPTZ NOT NULL
-      )
-    `);
-    await client.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS tourist_help_actions (
         id UUID PRIMARY KEY,
         action VARCHAR(16) NOT NULL CHECK (action IN ('safe', 'help', 'callback')),
@@ -1219,7 +1077,7 @@ async function initializeDatabase() {
         received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
-    await client.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS tourist_sms_subscriptions (
         phone_e164 VARCHAR(16) NOT NULL,
         area_id VARCHAR(16) NOT NULL CHECK (area_id IN ('kerala', 'wayanad')),
@@ -1230,55 +1088,9 @@ async function initializeDatabase() {
         PRIMARY KEY (phone_e164, area_id)
       )
     `);
-    await client.query(
-      "CREATE INDEX IF NOT EXISTS tourist_sms_subscriptions_area_idx ON tourist_sms_subscriptions (area_id)",
-    );
-    await client.query(
-      "ALTER TABLE tourist_help_actions ALTER COLUMN action TYPE VARCHAR(16)",
-    );
-    await client.query(
-      "ALTER TABLE tourist_help_actions DROP CONSTRAINT IF EXISTS tourist_help_actions_action_check",
-    );
-    await client.query(`
-      ALTER TABLE tourist_help_actions
-      ADD CONSTRAINT tourist_help_actions_action_check
-      CHECK (action IN ('safe', 'help', 'callback'))
-    `);
-    await client.query("COMMIT");
-    console.log("PostgreSQL database schema is ready.");
+    console.log("Neon database ready with tables.");
   } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch (rollbackError) {
-      console.error("PostgreSQL database rollback failed:", rollbackError.message);
-    }
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-function ensureDatabaseReady() {
-  if (!databaseInitialization) {
-    databaseInitialization = initializeDatabase().catch((error) => {
-      databaseInitialization = undefined;
-      throw error;
-    });
-  }
-  return databaseInitialization;
-}
-
-async function start() {
-  if (!process.env.SESSION_SECRET) {
-    console.error(
-      "Officer sign-in is disabled. Set SESSION_SECRET in the project .env file.",
-    );
-  }
-
-  try {
-    await ensureDatabaseReady();
-  } catch (error) {
-    console.error("PostgreSQL database is not available yet:", error.message);
+    console.error("Neon DB init check:", error.message);
   }
 
   app.listen(port, () => {
@@ -1286,8 +1098,4 @@ async function start() {
   });
 }
 
-if (require.main === module) {
-  start();
-}
-
-module.exports = app;
+start();
